@@ -1,0 +1,17 @@
+# 虛擬環境
+.venv/
+venv/
+env/
+
+# Google API 憑證與授權檔
+credentials.json
+token.json
+
+# Python 快取檔案 (執行程式時會自動產生的系統垃圾)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Mac 系統自動產生的隱藏檔
+.DS_Store
