@@ -2,6 +2,7 @@ import sys
 import os
 import tempfile
 import pygame
+import random
 from mutagen.mp3 import MP3
 from mutagen.wave import WAVE
 
@@ -299,6 +300,7 @@ class MusicPlayerWindow(QMainWindow):
         
         self.is_playing = False
         self.loop_mode = "LIST"
+        self.shuffle_sequence = []
         
         self.playback_timer = QTimer(self)
         self.playback_timer.timeout.connect(self.check_playback_status)
@@ -315,6 +317,12 @@ class MusicPlayerWindow(QMainWindow):
         if self.loop_mode == "LIST":
             self.loop_mode = "SINGLE"
             self.loop_mode_btn.setText("🔂 單曲循環")
+        elif self.loop_mode == "SINGLE":
+            self.loop_mode = "SHUFFLE"
+            self.loop_mode_btn.setText("🔀 隨機模式") # 列表打散的輪播
+        elif self.loop_mode == "SHUFFLE":
+            self.loop_mode = "RANDOM"
+            self.loop_mode_btn.setText("🎲 盲盒模式") # 每一首歌都是獨立隨機抽取
         else:
             self.loop_mode = "LIST"
             self.loop_mode_btn.setText("🔁 列表循環")
@@ -324,18 +332,36 @@ class MusicPlayerWindow(QMainWindow):
             return
             
         current_index = self.playlist_widget.currentRow()
+        total_songs = len(self.music_data)
         
-        # 👇 根據模式決定 next_index
         if self.loop_mode == "SINGLE":
-            # 單曲循環：index 不變
             next_index = current_index if current_index >= 0 else 0
-        else:
-            # 列表循環：往下走，到底就回頭
+            
+        elif self.loop_mode == "RANDOM": # 盲盒模式
+            next_index = random.randint(0, total_songs - 1)
+            
+        elif self.loop_mode == "SHUFFLE": # 隨機模式
+            # 只有在清單數量變動時才重新洗牌
+            if set(self.shuffle_sequence) != set(range(total_songs)):
+                self.shuffle_sequence = random.sample(range(total_songs), total_songs)
+                
+            if current_index < 0 or current_index not in self.shuffle_sequence:
+                next_index = self.shuffle_sequence[0]
+            else:
+                idx_in_seq = self.shuffle_sequence.index(current_index)
+                
+                if idx_in_seq + 1 >= total_songs:
+                    # 拔除重新洗牌的邏輯，直接回到這輪洗牌陣列的開頭
+                    next_index = self.shuffle_sequence[0]
+                else:
+                    next_index = self.shuffle_sequence[idx_in_seq + 1]
+                    
+        else: # "LIST" 列表循環
             if current_index < 0:
                 next_index = 0
             else:
-                next_index = (current_index + 1) % len(self.music_data)
-            
+                next_index = (current_index + 1) % total_songs
+                
         self.playlist_widget.setCurrentRow(next_index)
         self.play_selected_music()
 
