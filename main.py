@@ -300,7 +300,7 @@ class MusicPlayerWindow(QMainWindow):
         
         self.is_playing = False
         self.loop_mode = "LIST"
-        self.shuffle_sequence = []
+        self.song_counter = 0
         
         self.playback_timer = QTimer(self)
         self.playback_timer.timeout.connect(self.check_playback_status)
@@ -313,19 +313,31 @@ class MusicPlayerWindow(QMainWindow):
             self.play_next_song()
 
     def toggle_loop_mode(self):
-        # 簡單的狀態切換
         if self.loop_mode == "LIST":
             self.loop_mode = "SINGLE"
             self.loop_mode_btn.setText("🔂 單曲循環")
+            # 順序維持不變
+
         elif self.loop_mode == "SINGLE":
             self.loop_mode = "SHUFFLE"
-            self.loop_mode_btn.setText("🔀 隨機模式") # 列表打散的輪播
+            self.loop_mode_btn.setText("🔀 隨機模式")
+            # 將資料實體打散，並重繪 UI
+            random.shuffle(self.music_data)
+            self.refresh_playlist_ui()
+
         elif self.loop_mode == "SHUFFLE":
             self.loop_mode = "RANDOM"
-            self.loop_mode_btn.setText("🎲 盲盒模式") # 每一首歌都是獨立隨機抽取
+            self.loop_mode_btn.setText("🎲 盲盒模式")
+            # 利用 original_order 屬性，將資料恢復為最初始的順序，並重繪 UI
+            self.music_data.sort(key=lambda x: x.get('original_order', 0))
+            self.refresh_playlist_ui()
+
         else:
             self.loop_mode = "LIST"
             self.loop_mode_btn.setText("🔁 列表循環")
+            # 確保維持初始順序 (預防萬一)
+            self.music_data.sort(key=lambda x: x.get('original_order', 0))
+            self.refresh_playlist_ui()
 
     def play_next_song(self):
         if not self.music_data:
@@ -337,26 +349,10 @@ class MusicPlayerWindow(QMainWindow):
         if self.loop_mode == "SINGLE":
             next_index = current_index if current_index >= 0 else 0
             
-        elif self.loop_mode == "RANDOM": # 盲盒模式
+        elif self.loop_mode == "RANDOM":
             next_index = random.randint(0, total_songs - 1)
             
-        elif self.loop_mode == "SHUFFLE": # 隨機模式
-            # 只有在清單數量變動時才重新洗牌
-            if set(self.shuffle_sequence) != set(range(total_songs)):
-                self.shuffle_sequence = random.sample(range(total_songs), total_songs)
-                
-            if current_index < 0 or current_index not in self.shuffle_sequence:
-                next_index = self.shuffle_sequence[0]
-            else:
-                idx_in_seq = self.shuffle_sequence.index(current_index)
-                
-                if idx_in_seq + 1 >= total_songs:
-                    # 拔除重新洗牌的邏輯，直接回到這輪洗牌陣列的開頭
-                    next_index = self.shuffle_sequence[0]
-                else:
-                    next_index = self.shuffle_sequence[idx_in_seq + 1]
-                    
-        else: # "LIST" 列表循環
+        else:
             if current_index < 0:
                 next_index = 0
             else:
@@ -380,8 +376,10 @@ class MusicPlayerWindow(QMainWindow):
                 'name': song['name'],
                 'source': 'drive',
                 'id': song['id'],
-                'duration': duration
+                'duration': duration,
+                'original_order': self.song_counter
             })
+            self.song_counter += 1
         self.status_label.setText(f"狀態：最新加入了 {len(selected_songs)} 首雲端音樂")
 
     def load_local_music(self):
@@ -408,8 +406,10 @@ class MusicPlayerWindow(QMainWindow):
                     'name': file_name,
                     'source': 'local',
                     'path': file_path,
-                    'duration': duration_sec
+                    'duration': duration_sec,
+                    'original_order': self.song_counter
                 })
+                self.song_counter += 1
             self.status_label.setText(f"狀態：已加入 {len(files)} 首本機音樂")
 
     def remove_selected_music(self):
@@ -526,6 +526,20 @@ class MusicPlayerWindow(QMainWindow):
                 self.current_temp_file = None
             except Exception:
                 pass
+    
+    def refresh_playlist_ui(self):
+        self.playlist_widget.clear()
+        
+        for song in self.music_data:
+            duration = song.get('duration', 0)
+            time_str = format_time(duration)
+            icon = "☁️" if song['source'] == 'drive' else "💻"
+            self.playlist_widget.addItem(f"{icon} [{time_str}] {song['name']}")
+            
+        # 恢復選取「正在播放的歌曲」，讓反白跟著歌走
+        if self.current_playing_song in self.music_data:
+            current_idx = self.music_data.index(self.current_playing_song)
+            self.playlist_widget.setCurrentRow(current_idx)
 
     def closeEvent(self, event):
         self.stop_music()
