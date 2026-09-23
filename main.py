@@ -2,6 +2,9 @@ import sys
 import os
 import tempfile
 import pygame
+from mutagen.mp3 import MP3
+from mutagen.wave import WAVE
+
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QPushButton, QListWidget, QLabel, QProgressBar, QHBoxLayout,
                              QFileDialog, QDialog, QAbstractItemView, QListWidgetItem)
@@ -15,6 +18,31 @@ from googleapiclient.http import MediaIoBaseDownload
 
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
+from contextlib import contextmanager
+
+# 在檔案最上方，與其他 def 工具函數放在一起
+@contextmanager
+def suppress_c_stderr():
+    """系統級別的攔截器，用來吞掉底層 C 函式庫 (如 libmpg123) 的煩人 log"""
+    try:
+        # 開啟作業系統的無底洞 (Windows 的 NUL，Mac/Linux 的 /dev/null)
+        null_fd = os.open(os.devnull, os.O_RDWR)
+        # 記住當前真正的 stderr (file descriptor 通常是 2)
+        save_fd = os.dup(sys.stderr.fileno())
+        # 將系統的 stderr 強制切換到黑洞
+        os.dup2(null_fd, sys.stderr.fileno())
+        
+        yield # 執行括號內的程式碼
+        
+    finally:
+        # 執行完畢後，把 stderr 切回原本的樣子，並關閉資源
+        os.dup2(save_fd, sys.stderr.fileno())
+        os.close(null_fd)
+        os.close(save_fd)
+
+# ---------------------------------------------------------
+# 共用工具與驗證
+# ---------------------------------------------------------
 def get_credentials():
     creds = None
     if os.path.exists('token.json'):
@@ -29,7 +57,16 @@ def get_credentials():
             token.write(creds.to_json())
     return creds
 
-# --- 背景執行緒 ---
+def format_time(seconds):
+    if seconds is None or seconds <= 0:
+        return "未知"
+    mins = int(seconds) // 60
+    secs = int(seconds) % 60
+    return f"{mins:02d}:{secs:02d}"
+
+# ---------------------------------------------------------
+# 背景執行緒
+# ---------------------------------------------------------
 class DriveFolderLoaderThread(QThread):
     items_fetched_signal = pyqtSignal(list)
 
@@ -94,7 +131,6 @@ class DriveDownloadThread(QThread):
 # 雲端檔案總管視窗 (Toast 版本)
 # ---------------------------------------------------------
 class DriveExplorerDialog(QDialog):
-    # 自訂訊號：當使用者按下加入時，把歌曲清單發送給主視窗
     songs_added_signal = pyqtSignal(list)
 
     def __init__(self, parent=None):
@@ -120,10 +156,9 @@ class DriveExplorerDialog(QDialog):
         
         self.btn_layout = QHBoxLayout()
         self.add_btn = QPushButton("加入選取的音樂")
-        self.add_btn.clicked.connect(self.add_songs_action) # 改為觸發自訂函數，不關閉視窗
-        
+        self.add_btn.clicked.connect(self.add_songs_action)
         self.close_btn = QPushButton("關閉")
-        self.close_btn.clicked.connect(self.accept) # 只有按關閉才會真的關掉視窗
+        self.close_btn.clicked.connect(self.accept)
         
         self.btn_layout.addWidget(self.add_btn)
         self.btn_layout.addWidget(self.close_btn)
@@ -146,10 +181,19 @@ class DriveExplorerDialog(QDialog):
     def on_items_loaded(self, items):
         self.list_widget.setEnabled(True)
         self.status_label.setText(f"目前目錄共有 {len(items)} 個項目 (雙擊進入資料夾)")
-        self.status_label.setStyleSheet("") # 確保文字顏色正常
+        self.status_label.setStyleSheet("")
         
         for item in items:
             is_folder = item['mimeType'] == 'application/vnd.google-apps.folder'
+            
+            duration_str = ""
+            if not is_folder:
+                duration_millis = item.get('audioMediaMetadata', {}).get('durationMillis')
+                if duration_millis:
+                    seconds = int(duration_millis) / 1000
+                    duration_str = f" [{format_time(seconds)}]"
+                    item['duration_sec'] = seconds
+            
             icon = "📁" if is_folder else "🎵"
             list_item = QListWidgetItem(f"{icon} {item['name']}")
             list_item.setData(Qt.ItemDataRole.UserRole, item)
@@ -180,22 +224,16 @@ class DriveExplorerDialog(QDialog):
         if not songs:
             return
             
-        # 1. 透過訊號把歌送到主視窗
         self.songs_added_signal.emit(songs)
         
-        # 2. 實作 Toast 動態提示 (變更文字與顏色，2秒後恢復)
         original_text = f"目前目錄共有 {self.list_widget.count()} 個項目 (雙擊進入資料夾)"
         self.status_label.setText(f"✅ 成功加入 {len(songs)} 首音樂！")
-        self.status_label.setStyleSheet("color: #2e7d32; font-weight: bold;") # 給一點綠色提示
-        
-        # 清除選取狀態，讓使用者知道已經加過了
+        self.status_label.setStyleSheet("color: #2e7d32; font-weight: bold;")
         self.list_widget.clearSelection()
         
-        # 設定 QTimer，2000 毫秒 (2秒) 後把標籤改回原本的樣子
         QTimer.singleShot(2000, lambda: self.reset_status_label(original_text))
 
     def reset_status_label(self, text):
-        # 檢查是否還在同一個資料夾，避免切換資料夾後文字被蓋掉
         if "✅" in self.status_label.text():
             self.status_label.setText(text)
             self.status_label.setStyleSheet("")
@@ -206,7 +244,7 @@ class DriveExplorerDialog(QDialog):
 class MusicPlayerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("跨平台混合播放器 (Drive + Local)")
+        self.setWindowTitle("懶人雲端播放器 (Drive + Local)")
         self.resize(550, 500)
         
         pygame.mixer.init()
@@ -236,42 +274,87 @@ class MusicPlayerWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.layout.addWidget(self.progress_bar)
         
-        # --- 控制區新增「刪除」按鈕 ---
         self.control_layout = QHBoxLayout()
         self.play_btn = QPushButton("▶ 播放選取音樂")
         self.play_btn.clicked.connect(self.play_selected_music)
-        
         self.stop_btn = QPushButton("⏹ 停止播放")
         self.stop_btn.clicked.connect(self.stop_music)
-        
         self.remove_btn = QPushButton("🗑️ 移除選取")
         self.remove_btn.clicked.connect(self.remove_selected_music)
+
+        self.loop_mode_btn = QPushButton("🔁 列表循環")
+        self.loop_mode_btn.clicked.connect(self.toggle_loop_mode)
         
         self.control_layout.addWidget(self.play_btn)
         self.control_layout.addWidget(self.stop_btn)
         self.control_layout.addWidget(self.remove_btn)
+        self.control_layout.addWidget(self.loop_mode_btn)
         self.layout.addLayout(self.control_layout)
         
         self.setCentralWidget(self.central_widget)
         
         self.music_data = []
         self.current_temp_file = None 
-        self.current_playing_song = None # 新增這行，用來記住現在播的是哪首
+        self.current_playing_song = None
+        
+        self.is_playing = False
+        self.loop_mode = "LIST"
+        
+        self.playback_timer = QTimer(self)
+        self.playback_timer.timeout.connect(self.check_playback_status)
+        self.playback_timer.start(200) 
+
+    def check_playback_status(self):
+        # 只要我們標記為正在播放，且 pygame 底層說「我沒在播了」，那就是自然播完
+        if self.is_playing and not pygame.mixer.music.get_busy():
+            self.is_playing = False # 解除標記，避免重複觸發
+            self.play_next_song()
+
+    def toggle_loop_mode(self):
+        # 簡單的狀態切換
+        if self.loop_mode == "LIST":
+            self.loop_mode = "SINGLE"
+            self.loop_mode_btn.setText("🔂 單曲循環")
+        else:
+            self.loop_mode = "LIST"
+            self.loop_mode_btn.setText("🔁 列表循環")
+
+    def play_next_song(self):
+        if not self.music_data:
+            return
+            
+        current_index = self.playlist_widget.currentRow()
+        
+        # 👇 根據模式決定 next_index
+        if self.loop_mode == "SINGLE":
+            # 單曲循環：index 不變
+            next_index = current_index if current_index >= 0 else 0
+        else:
+            # 列表循環：往下走，到底就回頭
+            if current_index < 0:
+                next_index = 0
+            else:
+                next_index = (current_index + 1) % len(self.music_data)
+            
+        self.playlist_widget.setCurrentRow(next_index)
+        self.play_selected_music()
 
     def open_drive_explorer(self):
         dialog = DriveExplorerDialog(self)
-        # 把雲端視窗發出來的訊號，接回主視窗的函數
         dialog.songs_added_signal.connect(self.on_songs_added_from_drive)
-        dialog.exec() # 開啟對話框
+        dialog.exec()
 
     def on_songs_added_from_drive(self, selected_songs):
-        # 接收到訊號時，把歌加入清單
         for song in selected_songs:
-            self.playlist_widget.addItem(f"☁️ [雲端] {song['name']}")
+            duration = song.get('duration_sec', 0)
+            time_str = format_time(duration)
+            
+            self.playlist_widget.addItem(f"☁️ [{time_str}] {song['name']}")
             self.music_data.append({
                 'name': song['name'],
                 'source': 'drive',
-                'id': song['id']
+                'id': song['id'],
+                'duration': duration
             })
         self.status_label.setText(f"狀態：最新加入了 {len(selected_songs)} 首雲端音樂")
 
@@ -280,15 +363,29 @@ class MusicPlayerWindow(QMainWindow):
         if files:
             for file_path in files:
                 file_name = os.path.basename(file_path)
-                self.playlist_widget.addItem(f"💻 [本機] {file_name}")
+                
+                duration_sec = 0
+                try:
+                    if file_path.lower().endswith('.mp3'):
+                        audio = MP3(file_path)
+                        duration_sec = audio.info.length
+                    elif file_path.lower().endswith('.wav'):
+                        audio = WAVE(file_path)
+                        duration_sec = audio.info.length
+                except Exception:
+                    pass
+                
+                time_str = format_time(duration_sec)
+                
+                self.playlist_widget.addItem(f"💻 [{time_str}] {file_name}")
                 self.music_data.append({
                     'name': file_name,
                     'source': 'local',
-                    'path': file_path
+                    'path': file_path,
+                    'duration': duration_sec
                 })
             self.status_label.setText(f"狀態：已加入 {len(files)} 首本機音樂")
 
-    # --- 實作刪除邏輯 ---
     def remove_selected_music(self):
         selected_index = self.playlist_widget.currentRow()
         if selected_index < 0:
@@ -296,15 +393,11 @@ class MusicPlayerWindow(QMainWindow):
             
         song_to_remove = self.music_data[selected_index]
         
-        # 只有當「準備刪除的歌」剛好就是「正在播放的歌」時，才需要停止音樂
         if self.current_playing_song == song_to_remove:
             self.stop_music()
             self.current_playing_song = None
         
-        # 從畫面清單中移除
         self.playlist_widget.takeItem(selected_index)
-        
-        # 從背後的資料陣列中移除
         del self.music_data[selected_index]
         
         self.status_label.setText(f"狀態：已移除 [{song_to_remove['name']}]")
@@ -317,17 +410,6 @@ class MusicPlayerWindow(QMainWindow):
         selected_song = self.music_data[selected_index]
         self.stop_music()
         
-        # 記住現在準備播放的這首歌
-        self.current_playing_song = selected_song 
-        
-        if selected_song['source'] == 'local':selected_index = self.playlist_widget.currentRow()
-        if selected_index < 0:
-            return
-            
-        selected_song = self.music_data[selected_index]
-        self.stop_music()
-        
-        # 記住現在準備播放的這首歌
         self.current_playing_song = selected_song 
         
         if selected_song['source'] == 'local':
@@ -335,18 +417,23 @@ class MusicPlayerWindow(QMainWindow):
             self.play_btn.setEnabled(False)
             
             try:
-                pygame.mixer.music.load(selected_song['path'])
+                with suppress_c_stderr():
+                    pygame.mixer.music.load(selected_song['path'])
                 pygame.mixer.music.play()
+                self.is_playing = True
             except Exception as e:
                 self.status_label.setText(f"狀態：播放失敗 ({e})")
             
             self.play_btn.setEnabled(True)
             
         elif selected_song['source'] == 'drive':
-            self.status_label.setText(f"狀態：正在緩衝雲端音樂 [{selected_song['name']}]...")
+            self.status_label.setText(f"狀態：正在下載雲端音樂 [{selected_song['name']}]...")
             self.play_btn.setEnabled(False)
             self.progress_bar.setValue(0)
             self.progress_bar.setVisible(True)
+            
+            # 正在下載，這時候還不算播放中
+            self.is_playing = False 
             
             self.download_thread = DriveDownloadThread(selected_song['id'])
             self.download_thread.progress_signal.connect(self.update_progress)
@@ -361,14 +448,40 @@ class MusicPlayerWindow(QMainWindow):
         self.play_btn.setEnabled(True)
         self.current_temp_file = temp_path
         
+        # 👇 新增：趁著檔案已經在本地，馬上解析長度！
+        duration_sec = 0
         try:
-            pygame.mixer.music.load(temp_path)
+            audio = MP3(temp_path)
+            duration_sec = audio.info.length
+        except Exception:
+            pass # 如果解析失敗就算了
+            
+        # 如果解析成功，立刻更新畫面與資料陣列
+        if duration_sec > 0:
+            current_index = self.playlist_widget.currentRow()
+            if current_index >= 0:
+                # 更新背後資料
+                self.music_data[current_index]['duration'] = duration_sec
+                # 重新組合文字 (例如從 ☁️ [未知] 變成 ☁️ [04:13])
+                song_name = self.music_data[current_index]['name']
+                time_str = format_time(duration_sec)
+                new_text = f"☁️ [{time_str}] {song_name}"
+                # 更新 UI 畫面
+                self.playlist_widget.item(current_index).setText(new_text)
+        
+        try:
+            with suppress_c_stderr():
+                pygame.mixer.music.load(temp_path)
             pygame.mixer.music.play()
+            self.is_playing = True
             self.status_label.setText("狀態：🎵 播放雲端音樂中...")
         except Exception as e:
             self.status_label.setText(f"狀態：播放失敗 ({e})")
 
     def stop_music(self):
+        # 只要使用者按停止，就解除播放標記，巡邏員就不會誤以為是播完
+        self.is_playing = False
+        
         if pygame.mixer.music.get_busy():
             pygame.mixer.music.stop()
         
