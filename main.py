@@ -276,18 +276,29 @@ class MusicPlayerWindow(QMainWindow):
         self.layout.addWidget(self.progress_bar)
         
         self.control_layout = QHBoxLayout()
-        self.play_btn = QPushButton("▶ 播放選取音樂")
+        
+        self.prev_btn = QPushButton("⏮ 上一首")
+        self.prev_btn.clicked.connect(self.play_prev_song)
+        
+        self.play_btn = QPushButton("▶ 播放")
         self.play_btn.clicked.connect(self.play_selected_music)
-        self.stop_btn = QPushButton("⏹ 停止播放")
+        
+        self.stop_btn = QPushButton("⏹ 停止")
         self.stop_btn.clicked.connect(self.stop_music)
-        self.remove_btn = QPushButton("🗑️ 移除選取")
+        
+        self.next_btn = QPushButton("⏭ 下一首")
+        self.next_btn.clicked.connect(self.play_next_song)
+        
+        self.remove_btn = QPushButton("🗑️ 移除")
         self.remove_btn.clicked.connect(self.remove_selected_music)
-
+        
         self.loop_mode_btn = QPushButton("🔁 列表循環")
         self.loop_mode_btn.clicked.connect(self.toggle_loop_mode)
         
+        self.control_layout.addWidget(self.prev_btn)
         self.control_layout.addWidget(self.play_btn)
         self.control_layout.addWidget(self.stop_btn)
+        self.control_layout.addWidget(self.next_btn)
         self.control_layout.addWidget(self.remove_btn)
         self.control_layout.addWidget(self.loop_mode_btn)
         self.layout.addLayout(self.control_layout)
@@ -338,6 +349,32 @@ class MusicPlayerWindow(QMainWindow):
             # 確保維持初始順序 (預防萬一)
             self.music_data.sort(key=lambda x: x.get('original_order', 0))
             self.refresh_playlist_ui()
+
+    def play_prev_song(self):
+        if not self.music_data:
+            return
+            
+        current_index = self.playlist_widget.currentRow()
+        total_songs = len(self.music_data)
+        
+        if self.loop_mode == "SINGLE":
+            # 單曲循環：保持當前歌曲重播
+            next_index = current_index if current_index >= 0 else 0
+            
+        elif self.loop_mode == "RANDOM":
+            # 盲盒模式：因為是完全獨立的隨機事件，上一首也是隨機抽
+            next_index = random.randint(0, total_songs - 1)
+            
+        else:
+            # "LIST" (列表) 與 "SHUFFLE" (隨機模式：已實體打散陣列)
+            if current_index <= 0:
+                # 如果已經是第一首，或者是沒選取，就跳到最後一首 (頭尾相連)
+                next_index = total_songs - 1
+            else:
+                next_index = current_index - 1
+                
+        self.playlist_widget.setCurrentRow(next_index)
+        self.play_selected_music()
 
     def play_next_song(self):
         if not self.music_data:
@@ -432,6 +469,12 @@ class MusicPlayerWindow(QMainWindow):
         selected_index = self.playlist_widget.currentRow()
         if selected_index < 0:
             return
+            
+        # 👇 防呆：如果前一首歌還在下載，先強制停止下載執行緒
+        if hasattr(self, 'download_thread') and self.download_thread.isRunning():
+            self.download_thread.terminate()
+            self.download_thread.wait()
+            self.progress_bar.setVisible(False)
             
         selected_song = self.music_data[selected_index]
         self.stop_music()
