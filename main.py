@@ -16,6 +16,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from google.auth.exceptions import RefreshError
 
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
@@ -48,14 +49,25 @@ def get_credentials():
     creds = None
     if os.path.exists('token.json'):
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                # 嘗試刷新憑證
+                creds.refresh(Request())
+            except RefreshError:
+                # 如果遇到 7 天過期或被撤銷，就直接把失效的檔案刪除，重置 creds
+                os.remove('token.json')
+                creds = None
+                
+        # 如果沒有 creds (第一次登入，或是過期被我們刪掉了)
+        if not creds:
             flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
             creds = flow.run_local_server(port=0)
+            
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
+            
     return creds
 
 def format_time(seconds):
