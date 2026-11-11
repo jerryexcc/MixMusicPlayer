@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 import tempfile
 import pygame
 import random
@@ -278,6 +279,15 @@ class MusicPlayerWindow(QMainWindow):
         self.load_local_btn.clicked.connect(self.load_local_music)
         self.btn_layout.addWidget(self.load_local_btn)
         self.layout.addLayout(self.btn_layout)
+
+        self.playlist_io_layout = QHBoxLayout()
+        self.save_playlist_btn = QPushButton("💾 存檔歌單")
+        self.save_playlist_btn.clicked.connect(self.save_playlist)
+        self.load_playlist_btn = QPushButton("📋 讀取歌單")
+        self.load_playlist_btn.clicked.connect(self.load_playlist)
+        self.playlist_io_layout.addWidget(self.save_playlist_btn)
+        self.playlist_io_layout.addWidget(self.load_playlist_btn)
+        self.layout.addLayout(self.playlist_io_layout)
         
         self.playlist_widget = QListWidget()
         self.layout.addWidget(self.playlist_widget)
@@ -595,6 +605,92 @@ class MusicPlayerWindow(QMainWindow):
         if self.current_playing_song in self.music_data:
             current_idx = self.music_data.index(self.current_playing_song)
             self.playlist_widget.setCurrentRow(current_idx)
+
+    def save_playlist(self):
+        """將目前歌單的路徑/ID 等元資訊存成 JSON 檔"""
+        if not self.music_data:
+            self.status_label.setText("狀態：歌單是空的，沒什麼好存的 😅")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "儲存歌單", "playlist.json", "JSON 歌單 (*.json)"
+        )
+        if not file_path:
+            return
+
+        # 只保留必要的元資訊，不含暫存檔路徑
+        SAVE_KEYS_LOCAL = ('name', 'source', 'path', 'duration', 'original_order')
+        SAVE_KEYS_DRIVE = ('name', 'source', 'id', 'duration', 'original_order')
+
+        exportable = []
+        for song in self.music_data:
+            if song['source'] == 'local':
+                exportable.append({k: song[k] for k in SAVE_KEYS_LOCAL if k in song})
+            elif song['source'] == 'drive':
+                exportable.append({k: song[k] for k in SAVE_KEYS_DRIVE if k in song})
+
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(exportable, f, ensure_ascii=False, indent=2)
+            self.status_label.setText(f"狀態：✅ 歌單已儲存至 {os.path.basename(file_path)}")
+        except Exception as e:
+            self.status_label.setText(f"狀態：❌ 儲存失敗 ({e})")
+
+    def load_playlist(self):
+        """從 JSON 檔讀取歌單並重建播放清單"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "讀取歌單", "", "JSON 歌單 (*.json)"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                songs = json.load(f)
+        except Exception as e:
+            self.status_label.setText(f"狀態：❌ 讀取失敗 ({e})")
+            return
+
+        missing_local = []  # 路徑已失效的本機歌曲
+
+        for song in songs:
+            source = song.get('source')
+            name = song.get('name', '未知歌曲')
+            duration = song.get('duration', 0)
+            time_str = format_time(duration)
+
+            if source == 'local':
+                path = song.get('path', '')
+                if not os.path.exists(path):
+                    missing_local.append(name)
+                    continue  # 路徑失效就跳過，不加入歌單
+                self.playlist_widget.addItem(f"💻 [{time_str}] {name}")
+                self.music_data.append({
+                    'name': name,
+                    'source': 'local',
+                    'path': path,
+                    'duration': duration,
+                    'original_order': self.song_counter,
+                })
+
+            elif source == 'drive':
+                drive_id = song.get('id', '')
+                self.playlist_widget.addItem(f"☁️ [{time_str}] {name}")
+                self.music_data.append({
+                    'name': name,
+                    'source': 'drive',
+                    'id': drive_id,
+                    'duration': duration,
+                    'original_order': self.song_counter,
+                })
+
+            self.song_counter += 1
+
+        loaded_count = len(songs) - len(missing_local)
+        msg = f"狀態：✅ 已從歌單讀入 {loaded_count} 首音樂"
+        if missing_local:
+            msg += f"，⚠️ {len(missing_local)} 首本機檔案路徑失效已略過"
+        self.status_label.setText(msg)
 
     def closeEvent(self, event):
         self.stop_music()

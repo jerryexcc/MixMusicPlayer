@@ -15,3 +15,5 @@ __pycache__/
 
 # Mac 系統自動產生的隱藏檔
 .DS_Store
+
+playlist/
